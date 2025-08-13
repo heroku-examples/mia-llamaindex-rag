@@ -1,6 +1,19 @@
 {
-    "name": "streamlit",
+    "name": "mia-llamaindex-rag",
     "stack": "heroku-24",
+    "addons": [
+        {
+            "plan": "heroku-postgresql:essential-0"
+        },
+        {
+            "plan": "heroku-inference:claude-4-sonnet",
+            "as": "INFERENCE"
+        },
+        {
+            "plan": "heroku-inference:cohere-embed-multilingual",
+            "as": "EMBEDDING"
+        }
+    ],
     "buildpacks": [
         {
             "url": "heroku-community/apt"
