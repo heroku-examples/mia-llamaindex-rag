@@ -109,8 +109,7 @@ def setup_rag_index():
     # Create a query engine to interact with the data
     query_engine = index.as_query_engine(
         llm=llm,
-        # "tree_summarize", "refine", "compact", "simple_summarize"
-        response_mode=response_mode,
+        response_mode=response_mode, # "tree_summarize", "refine", "compact", "simple_summarize"
         similarity_top_k=top_k  # Number of relevant document chunks to retrieve
     )
 
