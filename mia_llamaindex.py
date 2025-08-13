@@ -11,21 +11,18 @@ from llama_index.vector_stores.postgres import PGVectorStore
 from dotenv import load_dotenv
 from sqlalchemy import make_url
 from utils import show_code
-import traceback
 
 load_dotenv()
 
+# Get Heroku AI and Postgres config from environment variables
 inference_model_id = os.environ.get("INFERENCE_MODEL_ID")
 embedding_model_id = os.environ.get("EMBEDDING_MODEL_ID")
-database_url = os.environ.get("DATABASE_URL").replace("postgres://", "postgresql://")
 
 # Initialize session state
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'documents_uploaded' not in st.session_state:
     st.session_state.documents_uploaded = []
-if 'selected_documents' not in st.session_state:
-    st.session_state.selected_documents = []
 if 'model_id' not in st.session_state:
     st.session_state.model_id = inference_model_id
 if 'embedding_model' not in st.session_state:
@@ -39,48 +36,54 @@ if 'query_engine' not in st.session_state:
 if 'index_ready' not in st.session_state:
     st.session_state.index_ready = False
 
-# Get current settings from session state
+# Get current RAG settings from session state
 top_k = st.session_state.top_k_results
 response_mode = st.session_state.response_mode
 
-# LlamaIndex Utilities
+# LlamaIndex RAG Pipeline
+
+
 def setup_rag_index():
     """Setup the RAG index and query engine - run once when documents are available"""
-    
+
+    # Initialize Heroku AI model
     llm = Heroku()
 
-    # Use OpenAIEmbedding class pointed at Heroku's service
+    # Use OpenAILikeEmbedding class pointed at Heroku's service
     # It reads the EMBEDDING_URL, EMBEDDING_KEY, and EMBEDDING_MODEL_ID from env vars
     embed_model = OpenAILikeEmbedding(
-        #api_base="http://localhost:3000/v1",
+        # api_base="http://localhost:3000/v1",
         api_base=os.environ.get("EMBEDDING_URL") + "/v1",
         api_key=os.environ.get("EMBEDDING_KEY"),
         model_name=os.environ.get("EMBEDDING_MODEL_ID"),
         embed_batch_size=96,
     )
 
-    # Configure text splitter to ensure chunks are under 2048 characters
-    # Using 1000 to leave room for metadata and ensure we stay under limit
+    # Configure text splitter to ensure chunks are under the character limit
+    # Using 512 to leave room for metadata and ensure we stay under limit
     text_splitter = SentenceSplitter(
-        chunk_size=512,  # Max characters per chunk (well under 2048 limit)
+        chunk_size=512,  # Max characters per chunk
         chunk_overlap=10,  # Overlap between chunks for context
         separator=" ",
     )
-    
+
     # Set global settings for LlamaIndex
     Settings.text_splitter = text_splitter
     Settings.embed_model = embed_model
     Settings.llm = llm
 
-    # Load data from a local directory
+    # Load data from the documents folder
     documents = SimpleDirectoryReader(DOCUMENTS_FOLDER).load_data()
-    
+
     # Parse documents into nodes with proper chunking
     nodes = text_splitter.get_nodes_from_documents(documents)
 
-    # Connect to the Heroku Postgres database
-    # The DATABASE_URL config var is automatically set by Heroku
-    url = make_url(database_url) # os.environ.get("DATABASE_URL").replace("postgres://", "postgresql://")
+    # Connect to the Heroku Postgres database with pgvector support
+    # The DATABASE_URL config var is automatically set by Heroku and contains the connection string
+    # We need to parse the connection string and pass it to the PGVectorStore
+    database_url = os.environ.get("DATABASE_URL").replace(
+        "postgres://", "postgresql://")
+    url = make_url(database_url)
     vector_store = PGVectorStore.from_params(
         database=url.database,
         host=url.host,
@@ -105,13 +108,14 @@ def setup_rag_index():
 
     # Create a query engine to interact with the data
     query_engine = index.as_query_engine(
-        llm=llm, 
-        response_mode=response_mode, # "tree_summarize", "refine", "compact", "simple_summarize"
-        similarity_top_k=top_k # Number of relevant document chunks to retrieve
+        llm=llm,
+        # "tree_summarize", "refine", "compact", "simple_summarize"
+        response_mode=response_mode,
+        similarity_top_k=top_k  # Number of relevant document chunks to retrieve
     )
 
-
     # Use the query engine to query the documents
+    # Example:
     # response = query_engine.query("What is the main takeaway from my documents?")
     return query_engine
 
@@ -121,6 +125,8 @@ def query_documents(prompt, query_engine):
     response = query_engine.query(prompt)
     return response
 
+
+# Load Heroku AI icon
 icon = Image.open("assets/mia-icon.png")
 
 # Page config
@@ -129,6 +135,7 @@ st.set_page_config(
     page_icon=icon,
     layout="wide"
 )
+st.logo(icon, size="large", link="https://www.heroku.com/ai")
 
 # Hide Deploy Button and other elements
 st.markdown("""
@@ -148,6 +155,8 @@ DOCUMENTS_FOLDER = Path("documents")
 DOCUMENTS_FOLDER.mkdir(exist_ok=True)  # Ensure folder exists
 
 # Helper functions
+
+
 def get_documents_in_folder():
     """Get list of documents in the documents folder"""
     if not DOCUMENTS_FOLDER.exists():
@@ -165,16 +174,7 @@ def save_uploaded_file(uploaded_file):
 
 # Sidebar
 with st.sidebar:
-    st.image("assets/mia-icon.png", width=50)
     st.title("RAG Chat Settings")
-    
-    # Index Status
-    if st.session_state.index_ready:
-        st.success("🔧 RAG Index: Ready")
-    else:
-        st.warning("🔧 RAG Index: Not ready")
-    
-    st.divider()
 
     # Model Configuration Section
     st.subheader("🤖 Model Configuration")
@@ -203,9 +203,11 @@ with st.sidebar:
     st.subheader("🔍 Retrieval Settings")
 
     # Store previous values to detect changes
-    prev_top_k = st.session_state.get('prev_top_k', st.session_state.top_k_results)
-    prev_response_mode = st.session_state.get('prev_response_mode', st.session_state.response_mode)
-    
+    prev_top_k = st.session_state.get(
+        'prev_top_k', st.session_state.top_k_results)
+    prev_response_mode = st.session_state.get(
+        'prev_response_mode', st.session_state.response_mode)
+
     st.session_state.top_k_results = st.slider(
         "Top K Results",
         min_value=1,
@@ -226,15 +228,15 @@ with st.sidebar:
         index=response_modes.index(st.session_state.response_mode),
         help="How to combine retrieved chunks into final response"
     )
-    
+
     # Check if settings changed and mark index for rebuild
-    if (st.session_state.top_k_results != prev_top_k or 
-        st.session_state.response_mode != prev_response_mode):
+    if (st.session_state.top_k_results != prev_top_k or
+            st.session_state.response_mode != prev_response_mode):
         if st.session_state.index_ready:
             st.session_state.index_ready = False
             st.session_state.query_engine = None
             st.info("⚙️ Settings changed - index will be rebuilt")
-    
+
     # Update previous values
     st.session_state.prev_top_k = st.session_state.top_k_results
     st.session_state.prev_response_mode = st.session_state.response_mode
@@ -266,8 +268,8 @@ with documents_container:
     if available_docs:
         st.info(f"Found {len(available_docs)} document(s) in folder")
         for doc in available_docs:
-            selected = "✅" if doc in st.session_state.selected_documents else "⬜"
-            st.text(f"{selected} {doc}")
+            st.text(f" 📄 {doc}")
+
     else:
         st.warning("No documents in folder")
 
@@ -284,11 +286,6 @@ if uploaded_files:
                 st.success(
                     f"✅ Successfully saved: {uploaded_file.name} to documents folder")
 
-                # Auto-select the newly uploaded document
-                if uploaded_file.name not in st.session_state.selected_documents:
-                    st.session_state.selected_documents.append(
-                        uploaded_file.name)
-                
                 # Reset index status to trigger rebuild
                 st.session_state.index_ready = False
                 st.session_state.query_engine = None
@@ -327,13 +324,14 @@ with messages_container:
 if prompt := st.chat_input("Ask a question about your documents..."):
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
-    
+
     # Generate AI response
     with st.spinner("🤖 Thinking..."):
         try:
             if st.session_state.index_ready and st.session_state.query_engine:
                 # Use actual RAG pipeline
-                response = query_documents(prompt, st.session_state.query_engine)
+                response = query_documents(
+                    prompt, st.session_state.query_engine)
                 response_text = str(response)
             else:
                 available_docs = get_documents_in_folder()
@@ -343,9 +341,10 @@ if prompt := st.chat_input("Ask a question about your documents..."):
                     response_text = "📁 No documents available. Please upload some documents first to enable RAG functionality."
         except Exception as e:
             response_text = f"❌ Error processing your question: {str(e)}"
-    
+
     # Add AI response to session state
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": response_text})
     st.rerun()
 
 

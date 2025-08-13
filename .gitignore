@@ -1,4 +1,5 @@
 .venv
 .env
 .cursor
+.sfdx
 __pycache__

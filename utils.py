@@ -19,9 +19,9 @@ import textwrap
 
 def show_code(demo):
     """Showing the code of the demo."""
-    show_code = st.sidebar.checkbox("Show code", True)
+    show_code = st.sidebar.checkbox("Show LlamaIndex code", True)
     if show_code:
         # Showing the code of the demo.
-        st.markdown("## Code")
+        st.markdown("## LlamaIndex RAG Code")
         sourcelines, _ = inspect.getsourcelines(demo)
-        st.code(textwrap.dedent("".join(sourcelines[1:])))
+        st.code(textwrap.dedent("".join(sourcelines[2:-1])), language="python")
