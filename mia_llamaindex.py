@@ -11,6 +11,7 @@ from llama_index.vector_stores.postgres import PGVectorStore
 from dotenv import load_dotenv
 from sqlalchemy import make_url
 from utils import show_code
+from db import clear_vector_database, get_database_document_count, get_indexed_documents, delete_document_from_index
 
 load_dotenv()
 
@@ -35,6 +36,8 @@ if 'query_engine' not in st.session_state:
     st.session_state.query_engine = None
 if 'index_ready' not in st.session_state:
     st.session_state.index_ready = False
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 'file_uploader_1'
 
 # Get current RAG settings from session state
 top_k = st.session_state.top_k_results
@@ -52,7 +55,6 @@ def setup_rag_index():
     # Use OpenAILikeEmbedding class pointed at Heroku's service
     # It reads the EMBEDDING_URL, EMBEDDING_KEY, and EMBEDDING_MODEL_ID from env vars
     embed_model = OpenAILikeEmbedding(
-        # api_base="http://localhost:3000/v1",
         api_base=os.environ.get("EMBEDDING_URL") + "/v1",
         api_key=os.environ.get("EMBEDDING_KEY"),
         model_name=os.environ.get("EMBEDDING_MODEL_ID"),
@@ -72,11 +74,14 @@ def setup_rag_index():
     Settings.embed_model = embed_model
     Settings.llm = llm
 
-    # Load data from the documents folder
-    documents = SimpleDirectoryReader(DOCUMENTS_FOLDER).load_data()
-
-    # Parse documents into nodes with proper chunking
-    nodes = text_splitter.get_nodes_from_documents(documents)
+    # Load data from the documents folder and exclude already indexed documents
+    # Already indexed: SELECT DISTINCT metadata_->>'file_name' as file_name FROM data_documents WHERE metadata_->>'file_name' IS NOT NULL
+    already_indexed = get_indexed_documents()
+    try:
+        documents = SimpleDirectoryReader(
+            DOCUMENTS_FOLDER, exclude=already_indexed).load_data()
+    except Exception as e:
+        documents = []
 
     # Connect to the Heroku Postgres database with pgvector support
     # The DATABASE_URL config var is automatically set by Heroku and contains the connection string
@@ -97,25 +102,38 @@ def setup_rag_index():
     # Create a storage context to store the index
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-    # Create the index from nodes (already chunked properly)
-    index = VectorStoreIndex(
-        nodes=nodes,
-        vector_store=vector_store,
-        embed_model=embed_model,
-        storage_context=storage_context,
-        show_progress=True
-    )
+    # Handle different scenarios: new documents vs existing index
+    if len(documents) == 0:
+        # No new documents to index, load existing index from vector store
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            embed_model=embed_model,
+            storage_context=storage_context
+        )
+    else:
+        # Parse documents into nodes with proper chunking
+        nodes = text_splitter.get_nodes_from_documents(documents)
+
+        # Create/update the index with new nodes
+        index = VectorStoreIndex(
+            nodes=nodes,
+            vector_store=vector_store,
+            embed_model=embed_model,
+            storage_context=storage_context,
+            show_progress=True
+        )
 
     # Create a query engine to interact with the data
     query_engine = index.as_query_engine(
         llm=llm,
-        response_mode=response_mode, # "tree_summarize", "refine", "compact", "simple_summarize"
+        # "tree_summarize", "refine", "compact", "simple_summarize"
+        response_mode=response_mode,
         similarity_top_k=top_k  # Number of relevant document chunks to retrieve
     )
 
-    # Use the query engine to query the documents
+    # Use the query_engine to query the documents
     # Example:
-    # response = query_engine.query("What is the main takeaway from my documents?")
+    # response = query_engine.query("What are the benefits of AI?")
     return query_engine
 
 
@@ -154,6 +172,8 @@ DOCUMENTS_FOLDER = Path("documents")
 DOCUMENTS_FOLDER.mkdir(exist_ok=True)  # Ensure folder exists
 
 # Helper functions
+
+
 def get_documents_in_folder():
     """Get list of documents in the documents folder"""
     if not DOCUMENTS_FOLDER.exists():
@@ -167,6 +187,43 @@ def save_uploaded_file(uploaded_file):
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return file_path
+
+
+def delete_document(filename):
+    """Delete a document from the documents folder (with protection for certain files)"""
+    # Protected files that cannot be deleted
+    protected_files = ["AI and Machine Learning Overview.txt"]
+
+    if filename in protected_files:
+        return False, f"Cannot delete {filename} - this file is protected"
+
+    try:
+        file_path = DOCUMENTS_FOLDER / filename
+        if file_path.exists():
+            # Check if file is writable
+            if not os.access(file_path, os.W_OK):
+                return False, f"Permission denied: Cannot delete {filename}"
+
+            file_path.unlink()
+
+            # Verify file deletion was successful
+            if file_path.exists():
+                return False, f"Failed to delete {filename} - file still exists"
+
+            # Also delete the document from the vector database
+            db_success, db_message = delete_document_from_index(filename)
+            if not db_success:
+                # File was deleted but database cleanup failed - log this but don't fail the operation
+                return True, f"File {filename} deleted, but database cleanup failed: {db_message}"
+
+            return True, f"Successfully deleted {filename} from both file system and vector database"
+        else:
+            return False, f"File {filename} not found at path: {file_path}"
+    except PermissionError:
+        return False, f"Permission denied: Cannot delete {filename}"
+    except Exception as e:
+        return False, f"Error deleting {filename}: {str(e)}"
+
 
 # Sidebar
 with st.sidebar:
@@ -192,8 +249,6 @@ with st.sidebar:
         embedding_options,
         index=embedding_options.index(st.session_state.embedding_model)
     )
-
-    st.divider()
 
     # Retrieval Settings Section
     st.subheader("🔍 Retrieval Settings")
@@ -238,10 +293,80 @@ with st.sidebar:
     st.session_state.prev_response_mode = st.session_state.response_mode
 
     st.divider()
+    # RAG Index Status Section
+    st.subheader("📊 RAG Index Status")
+
+    # Check if index is ready
+    if st.session_state.index_ready:
+        st.success("✅ RAG index ready!")
+    else:
+        st.warning("⚙️ RAG index is not ready.")
+
+     # Automatic RAG Index Setup
+    available_docs = get_documents_in_folder()
+    if available_docs and not st.session_state.index_ready:
+        with st.spinner("Setting up RAG index..."):
+            try:
+                st.session_state.query_engine = setup_rag_index()
+                st.session_state.index_ready = True
+                # Refresh UI to update sidebar status
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to setup RAG index: {str(e)}")
+                st.session_state.index_ready = False
+
+    # Get document count from database
+    doc_count, count_message = get_database_document_count()
+    indexed_files = get_indexed_documents()
+
+    if doc_count is not None:
+        # Display document count
+        if doc_count == 0:
+            st.info("📄 **Documents in Index:** 0")
+            st.caption("No documents indexed yet")
+        else:
+            st.success(f"📄 **Documents in Index:** {doc_count}")
+            st.caption(
+                f"{doc_count} document chunk(s) stored in vector database")
+
+            # Show indexed files if any
+            if indexed_files:
+                with st.expander(f"📋 View Indexed Files ({len(indexed_files)})"):
+                    for file in indexed_files:
+                        st.text(f"📄 {file}")
+    else:
+        st.error("❌ **Database Status:** Error")
+        st.caption(f"Could not connect: {count_message}")
+
+    st.divider()
 
     # Reset Chat Button
-    if st.button("🗑️ Reset Chat", use_container_width=True):
+    if st.button("🗑️ Reset", use_container_width=True):
+        # Clear chat messages
         st.session_state.messages = []
+
+        # Clear vector database
+        with st.spinner("Clearing vector database..."):
+            db_success, db_message = clear_vector_database()
+            if db_success:
+                st.success(db_message)
+            else:
+                st.error(db_message)
+
+        # Reset index and query engine
+        st.session_state.index_ready = False
+        st.session_state.query_engine = None
+
+        # Clear uploaded files tracking
+        st.session_state.documents_uploaded = []
+
+        # Clear file uploader by changing its key
+        current_key = st.session_state.uploader_key
+        if current_key == 'file_uploader_1':
+            st.session_state.uploader_key = 'file_uploader_2'
+        else:
+            st.session_state.uploader_key = 'file_uploader_1'
+
         st.rerun()
 
 # Main content area
@@ -252,10 +377,13 @@ upload_container, documents_container = st.columns(2)
 
 with upload_container:
     st.subheader("📁 Upload Documents")
+    # Use a key that can be changed to clear the uploader
+    uploader_key = st.session_state.get('uploader_key', 'file_uploader_1')
     uploaded_files = st.file_uploader(
         "Choose files to upload for RAG",
         accept_multiple_files=True,
-        type=['txt', 'pdf', 'docx', 'md', 'csv']
+        type=['txt', 'pdf', 'docx', 'md', 'csv'],
+        key=uploader_key
     )
 
 with documents_container:
@@ -263,11 +391,58 @@ with documents_container:
     available_docs = get_documents_in_folder()
     if available_docs:
         st.info(f"Found {len(available_docs)} document(s) in folder")
+
+        # Display each document with a delete button
         for doc in available_docs:
-            st.text(f" 📄 {doc}")
+            col1, col2 = st.columns([4, 1])
+
+            with col1:
+                # Show protected status for certain files
+                protected_files = ["AI and Machine Learning Overview.txt"]
+                if doc in protected_files:
+                    st.text(f"🔒 📄 {doc} (protected)")
+                else:
+                    st.text(f"📄 {doc}")
+
+            with col2:
+                # Only show delete button for non-protected files
+                if doc not in protected_files:
+                    if st.button("🗑️", key=f"delete_{doc}", help=f"Delete {doc}"):
+                        success, message = delete_document(doc)
+                        if success:
+                            # Reset index status to trigger rebuild
+                            st.session_state.index_ready = False
+                            st.session_state.query_engine = None
+                            # Remove from uploaded files list if it exists
+                            if doc in st.session_state.documents_uploaded:
+                                st.session_state.documents_uploaded.remove(doc)
+                            # Clear file uploader by changing its key
+                            current_key = st.session_state.uploader_key
+                            if current_key == 'file_uploader_1':
+                                st.session_state.uploader_key = 'file_uploader_2'
+                            else:
+                                st.session_state.uploader_key = 'file_uploader_1'
+                            # Store success message in session state so it persists after rerun
+                            st.session_state.delete_message = (
+                                "success", message)
+                            st.rerun()
+                        else:
+                            st.session_state.delete_message = (
+                                "error", message)
+                            st.rerun()
 
     else:
         st.warning("No documents in folder")
+
+    # Display delete messages if any
+    if hasattr(st.session_state, 'delete_message'):
+        msg_type, msg_text = st.session_state.delete_message
+        if msg_type == "success":
+            st.success(msg_text)
+        else:
+            st.error(msg_text)
+        # Clear the message after displaying
+        del st.session_state.delete_message
 
 if uploaded_files:
     for uploaded_file in uploaded_files:
@@ -285,18 +460,6 @@ if uploaded_files:
                 st.session_state.index_ready = False
                 st.session_state.query_engine = None
                 st.rerun()  # Refresh to show updated file tree
-
-# Setup RAG index if we have documents and index isn't ready
-available_docs = get_documents_in_folder()
-if available_docs and not st.session_state.index_ready:
-    with st.spinner("🔧 Setting up RAG index..."):
-        try:
-            st.session_state.query_engine = setup_rag_index()
-            st.session_state.index_ready = True
-            st.success("✅ RAG index ready!")
-        except Exception as e:
-            st.error(f"❌ Failed to setup RAG index: {str(e)}")
-            st.session_state.index_ready = False
 
 # Chat Interface
 st.subheader("💬 Chat Interface")
@@ -316,7 +479,7 @@ with messages_container:
         st.info("No messages yet. Start by asking a question about your documents!")
 
 # Chat input at bottom (outside the scrollable container)
-if prompt := st.chat_input("Ask a question about your documents..."):
+if prompt := st.chat_input("Ask a question about your documents, for example: What are the benefits of AI?"):
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
 

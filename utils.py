@@ -19,7 +19,7 @@ import textwrap
 
 def show_code(demo):
     """Showing the code of the demo."""
-    show_code = st.sidebar.checkbox("Show LlamaIndex code", True)
+    show_code = st.sidebar.checkbox("Show LlamaIndex code", False)
     if show_code:
         # Showing the code of the demo.
         st.markdown("## LlamaIndex RAG Code")
