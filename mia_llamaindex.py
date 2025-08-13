@@ -154,8 +154,6 @@ DOCUMENTS_FOLDER = Path("documents")
 DOCUMENTS_FOLDER.mkdir(exist_ok=True)  # Ensure folder exists
 
 # Helper functions
-
-
 def get_documents_in_folder():
     """Get list of documents in the documents folder"""
     if not DOCUMENTS_FOLDER.exists():
@@ -169,7 +167,6 @@ def save_uploaded_file(uploaded_file):
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     return file_path
-
 
 # Sidebar
 with st.sidebar:
@@ -272,7 +269,6 @@ with documents_container:
     else:
         st.warning("No documents in folder")
 
-
 if uploaded_files:
     for uploaded_file in uploaded_files:
         if uploaded_file.name not in st.session_state.documents_uploaded:
@@ -345,7 +341,6 @@ if prompt := st.chat_input("Ask a question about your documents..."):
     st.session_state.messages.append(
         {"role": "assistant", "content": response_text})
     st.rerun()
-
 
 show_code(setup_rag_index)
 
