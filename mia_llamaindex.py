@@ -3,15 +3,10 @@ import time
 import os
 from PIL import Image
 from pathlib import Path
-from llama_index.llms.heroku import Heroku
-from llama_index.embeddings.openai_like import OpenAILikeEmbedding
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, StorageContext
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.vector_stores.postgres import PGVectorStore
 from dotenv import load_dotenv
-from sqlalchemy import make_url
 from utils import show_code
 from db import clear_vector_database, get_database_document_count, get_indexed_documents, delete_document_from_index
+from llamaindex_rag_pipeline import setup_rag_index, query_documents
 
 load_dotenv()
 
@@ -42,105 +37,6 @@ if 'uploader_key' not in st.session_state:
 # Get current RAG settings from session state
 top_k = st.session_state.top_k_results
 response_mode = st.session_state.response_mode
-
-# LlamaIndex RAG Pipeline
-
-
-def setup_rag_index():
-    """Setup the RAG index and query engine - run once when documents are available"""
-
-    # Initialize Heroku AI model
-    llm = Heroku()
-
-    # Use OpenAILikeEmbedding class pointed at Heroku's service
-    # It reads the EMBEDDING_URL, EMBEDDING_KEY, and EMBEDDING_MODEL_ID from env vars
-    embed_model = OpenAILikeEmbedding(
-        api_base=os.environ.get("EMBEDDING_URL") + "/v1",
-        api_key=os.environ.get("EMBEDDING_KEY"),
-        model_name=os.environ.get("EMBEDDING_MODEL_ID"),
-        embed_batch_size=96,
-    )
-
-    # Configure text splitter to ensure chunks are under the character limit
-    # Using 512 to leave room for metadata and ensure we stay under limit
-    text_splitter = SentenceSplitter(
-        chunk_size=512,  # Max characters per chunk
-        chunk_overlap=10,  # Overlap between chunks for context
-        separator=" ",
-    )
-
-    # Set global settings for LlamaIndex
-    Settings.text_splitter = text_splitter
-    Settings.embed_model = embed_model
-    Settings.llm = llm
-
-    # Load data from the documents folder and exclude already indexed documents
-    # Already indexed: SELECT DISTINCT metadata_->>'file_name' as file_name FROM data_documents WHERE metadata_->>'file_name' IS NOT NULL
-    already_indexed = get_indexed_documents()
-    try:
-        documents = SimpleDirectoryReader(
-            DOCUMENTS_FOLDER, exclude=already_indexed).load_data()
-    except Exception as e:
-        documents = []
-
-    # Connect to the Heroku Postgres database with pgvector support
-    # The DATABASE_URL config var is automatically set by Heroku and contains the connection string
-    # We need to parse the connection string and pass it to the PGVectorStore
-    database_url = os.environ.get("DATABASE_URL").replace(
-        "postgres://", "postgresql://")
-    url = make_url(database_url)
-    vector_store = PGVectorStore.from_params(
-        database=url.database,
-        host=url.host,
-        port=url.port,
-        user=url.username,
-        password=url.password,
-        table_name="documents",
-        embed_dim=1024  # Cohere embeddings have a dimension of 1024
-    )
-
-    # Create a storage context to store the index
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-    # Handle different scenarios: new documents vs existing index
-    if len(documents) == 0:
-        # No new documents to index, load existing index from vector store
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            embed_model=embed_model,
-            storage_context=storage_context
-        )
-    else:
-        # Parse documents into nodes with proper chunking
-        nodes = text_splitter.get_nodes_from_documents(documents)
-
-        # Create/update the index with new nodes
-        index = VectorStoreIndex(
-            nodes=nodes,
-            vector_store=vector_store,
-            embed_model=embed_model,
-            storage_context=storage_context,
-            show_progress=True
-        )
-
-    # Create a query engine to interact with the data
-    query_engine = index.as_query_engine(
-        llm=llm,
-        # "tree_summarize", "refine", "compact", "simple_summarize"
-        response_mode=response_mode,
-        similarity_top_k=top_k  # Number of relevant document chunks to retrieve
-    )
-
-    # Use the query_engine to query the documents
-    # Example:
-    # response = query_engine.query("What are the benefits of AI?")
-    return query_engine
-
-
-def query_documents(prompt, query_engine):
-    """Query the documents using the pre-built query engine"""
-    response = query_engine.query(prompt)
-    return response
 
 
 # Load Heroku AI icon
@@ -304,10 +200,16 @@ with st.sidebar:
 
      # Automatic RAG Index Setup
     available_docs = get_documents_in_folder()
+    indexed_files = get_indexed_documents()
+
     if available_docs and not st.session_state.index_ready:
         with st.spinner("Setting up RAG index..."):
             try:
-                st.session_state.query_engine = setup_rag_index()
+                st.session_state.query_engine = setup_rag_index(
+                    response_mode=st.session_state.response_mode,
+                    top_k=st.session_state.top_k_results,
+                    indexed_files=indexed_files
+                )
                 st.session_state.index_ready = True
                 # Refresh UI to update sidebar status
                 st.rerun()
@@ -317,7 +219,6 @@ with st.sidebar:
 
     # Get document count from database
     doc_count, count_message = get_database_document_count()
-    indexed_files = get_indexed_documents()
 
     if doc_count is not None:
         # Display document count
@@ -464,8 +365,8 @@ if uploaded_files:
 # Chat Interface
 st.subheader("💬 Chat Interface")
 
-# Display chat messages in a container
-messages_container = st.container()
+# Add chat messages to the UI
+messages_container = st.container(border=True)
 with messages_container:
     if st.session_state.messages:
         for message in st.session_state.messages:
@@ -478,34 +379,37 @@ with messages_container:
     else:
         st.info("No messages yet. Start by asking a question about your documents!")
 
-# Chat input at bottom (outside the scrollable container)
+# Chat input at bottom
 if prompt := st.chat_input("Ask a question about your documents, for example: What are the benefits of AI?"):
     # Add user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    with messages_container:
+        st.chat_message("user").write(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Generate AI response
-    with st.spinner("🤖 Thinking..."):
-        try:
-            if st.session_state.index_ready and st.session_state.query_engine:
-                # Use actual RAG pipeline
-                response = query_documents(
-                    prompt, st.session_state.query_engine)
-                response_text = str(response)
-            else:
-                available_docs = get_documents_in_folder()
-                if available_docs:
-                    response_text = f"⚠️ RAG index not ready yet. Found {len(available_docs)} document(s) in folder: {', '.join(available_docs)}. Please wait for the index to be set up or upload documents first."
+        # Generate AI response
+        with st.spinner("🤖 Thinking..."):
+            try:
+                if st.session_state.index_ready and st.session_state.query_engine:
+                    # Use actual RAG pipeline
+                    response = query_documents(
+                        prompt, st.session_state.query_engine)
+                    response_text = str(response)
                 else:
-                    response_text = "📁 No documents available. Please upload some documents first to enable RAG functionality."
-        except Exception as e:
-            response_text = f"❌ Error processing your question: {str(e)}"
+                    available_docs = get_documents_in_folder()
+                    if available_docs:
+                        response_text = f"⚠️ RAG index not ready yet. Found {len(available_docs)} document(s) in folder: {', '.join(available_docs)}. Please wait for the index to be set up or upload documents first."
+                    else:
+                        response_text = "📁 No documents available. Please upload some documents first to enable RAG functionality."
+            except Exception as e:
+                response_text = f"❌ Error processing your question: {str(e)}"
 
-    # Add AI response to session state
-    st.session_state.messages.append(
-        {"role": "assistant", "content": response_text})
-    st.rerun()
+        st.chat_message("assistant").write(response_text)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": response_text})
+        st.rerun()
 
-show_code(setup_rag_index)
+
+show_code()
 
 # Footer info
 st.sidebar.divider()

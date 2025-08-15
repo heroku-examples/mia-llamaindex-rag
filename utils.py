@@ -13,15 +13,19 @@
 # limitations under the License.
 
 import streamlit as st
-import inspect
 import textwrap
 
+file_path = "llamaindex_rag_pipeline.py"
 
-def show_code(demo):
+
+def show_code():
     """Showing the code of the demo."""
     show_code = st.sidebar.checkbox("Show LlamaIndex code", False)
     if show_code:
-        # Showing the code of the demo.
-        st.markdown("## LlamaIndex RAG Code")
-        sourcelines, _ = inspect.getsourcelines(demo)
-        st.code(textwrap.dedent("".join(sourcelines[2:-1])), language="python")
+        try:
+            with open(file_path, "r") as file:
+                code = file.read()
+            st.markdown("## LlamaIndex RAG Code")
+            st.code(textwrap.dedent(code), language="python")
+        except FileNotFoundError:
+            st.error(f"File {file_path} not found")
