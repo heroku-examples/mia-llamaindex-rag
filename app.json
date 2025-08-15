@@ -1,5 +1,6 @@
 {
     "name": "mia-llamaindex-rag",
+    "description": "RAG chat with LlamaIndex and Heroku AI",
     "stack": "heroku-24",
     "addons": [
         {
@@ -15,9 +16,6 @@
         }
     ],
     "buildpacks": [
-        {
-            "url": "heroku-community/apt"
-        },
         {
             "url": "heroku/python"
         }
